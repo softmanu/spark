@@ -18,6 +18,7 @@
 package org.apache.spark.sql
 
 import java.io.Closeable
+import java.util.concurrent.TimeUnit._
 import java.util.concurrent.atomic.AtomicReference
 
 import scala.collection.JavaConverters._
@@ -25,7 +26,7 @@ import scala.reflect.runtime.universe.TypeTag
 import scala.util.control.NonFatal
 
 import org.apache.spark.{SPARK_VERSION, SparkConf, SparkContext, TaskContext}
-import org.apache.spark.annotation.{DeveloperApi, Experimental, InterfaceStability}
+import org.apache.spark.annotation.{DeveloperApi, Evolving, Experimental, Stable, Unstable}
 import org.apache.spark.api.java.JavaRDD
 import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
@@ -73,7 +74,7 @@ import org.apache.spark.util.{CallSite, Utils}
  * @param parentSessionState If supplied, inherit all session state (i.e. temporary
  *                            views, SQL config, UDFs etc) from parent.
  */
-@InterfaceStability.Stable
+@Stable
 class SparkSession private(
     @transient val sparkContext: SparkContext,
     @transient private val existingSharedState: Option[SharedState],
@@ -84,8 +85,17 @@ class SparkSession private(
   // The call site where this SparkSession was constructed.
   private val creationSite: CallSite = Utils.getCallSite()
 
+  /**
+   * Constructor used in Pyspark. Contains explicit application of Spark Session Extensions
+   * which otherwise only occurs during getOrCreate. We cannot add this to the default constructor
+   * since that would cause every new session to reinvoke Spark Session Extensions on the currently
+   * running extensions.
+   */
   private[sql] def this(sc: SparkContext) {
-    this(sc, None, None, new SparkSessionExtensions)
+    this(sc, None, None,
+      SparkSession.applyExtensions(
+        sc.getConf.get(StaticSQLConf.SPARK_SESSION_EXTENSIONS).getOrElse(Seq.empty),
+        new SparkSessionExtensions))
   }
 
   sparkContext.assertNotStopped()
@@ -115,10 +125,10 @@ class SparkSession private(
    *
    * @since 2.2.0
    */
-  @InterfaceStability.Unstable
+  @Unstable
   @transient
   lazy val sharedState: SharedState = {
-    existingSharedState.getOrElse(new SharedState(sparkContext))
+    existingSharedState.getOrElse(new SharedState(sparkContext, initialSessionOptions))
   }
 
   /**
@@ -136,7 +146,7 @@ class SparkSession private(
    *
    * @since 2.2.0
    */
-  @InterfaceStability.Unstable
+  @Unstable
   @transient
   lazy val sessionState: SessionState = {
     parentSessionState
@@ -177,7 +187,7 @@ class SparkSession private(
    * @since 2.0.0
    */
   @Experimental
-  @InterfaceStability.Evolving
+  @Evolving
   def listenerManager: ExecutionListenerManager = sessionState.listenerManager
 
   /**
@@ -188,7 +198,7 @@ class SparkSession private(
    * @since 2.0.0
    */
   @Experimental
-  @InterfaceStability.Unstable
+  @Unstable
   def experimental: ExperimentalMethods = sessionState.experimentalMethods
 
   /**
@@ -222,7 +232,7 @@ class SparkSession private(
    * @since 2.0.0
    */
   @Experimental
-  @InterfaceStability.Unstable
+  @Unstable
   def streams: StreamingQueryManager = sessionState.streamingQueryManager
 
   /**
@@ -280,7 +290,7 @@ class SparkSession private(
    * @return 2.0.0
    */
   @Experimental
-  @InterfaceStability.Evolving
+  @Evolving
   def emptyDataset[T: Encoder]: Dataset[T] = {
     val encoder = implicitly[Encoder[T]]
     new Dataset(self, LocalRelation(encoder.schema.toAttributes), encoder)
@@ -293,7 +303,7 @@ class SparkSession private(
    * @since 2.0.0
    */
   @Experimental
-  @InterfaceStability.Evolving
+  @Evolving
   def createDataFrame[A <: Product : TypeTag](rdd: RDD[A]): DataFrame = {
     SparkSession.setActiveSession(this)
     val encoder = Encoders.product[A]
@@ -307,7 +317,7 @@ class SparkSession private(
    * @since 2.0.0
    */
   @Experimental
-  @InterfaceStability.Evolving
+  @Evolving
   def createDataFrame[A <: Product : TypeTag](data: Seq[A]): DataFrame = {
     SparkSession.setActiveSession(this)
     val schema = ScalaReflection.schemaFor[A].dataType.asInstanceOf[StructType]
@@ -347,7 +357,7 @@ class SparkSession private(
    * @since 2.0.0
    */
   @DeveloperApi
-  @InterfaceStability.Evolving
+  @Evolving
   def createDataFrame(rowRDD: RDD[Row], schema: StructType): DataFrame = {
     createDataFrame(rowRDD, schema, needsConversion = true)
   }
@@ -361,7 +371,7 @@ class SparkSession private(
    * @since 2.0.0
    */
   @DeveloperApi
-  @InterfaceStability.Evolving
+  @Evolving
   def createDataFrame(rowRDD: JavaRDD[Row], schema: StructType): DataFrame = {
     createDataFrame(rowRDD.rdd, schema)
   }
@@ -375,7 +385,7 @@ class SparkSession private(
    * @since 2.0.0
    */
   @DeveloperApi
-  @InterfaceStability.Evolving
+  @Evolving
   def createDataFrame(rows: java.util.List[Row], schema: StructType): DataFrame = {
     Dataset.ofRows(self, LocalRelation.fromExternalRows(schema.toAttributes, rows.asScala))
   }
@@ -465,7 +475,7 @@ class SparkSession private(
    * @since 2.0.0
    */
   @Experimental
-  @InterfaceStability.Evolving
+  @Evolving
   def createDataset[T : Encoder](data: Seq[T]): Dataset[T] = {
     val enc = encoderFor[T]
     val attributes = enc.schema.toAttributes
@@ -484,7 +494,7 @@ class SparkSession private(
    * @since 2.0.0
    */
   @Experimental
-  @InterfaceStability.Evolving
+  @Evolving
   def createDataset[T : Encoder](data: RDD[T]): Dataset[T] = {
     Dataset[T](self, ExternalRDD(data, self))
   }
@@ -506,7 +516,7 @@ class SparkSession private(
    * @since 2.0.0
    */
   @Experimental
-  @InterfaceStability.Evolving
+  @Evolving
   def createDataset[T : Encoder](data: java.util.List[T]): Dataset[T] = {
     createDataset(data.asScala)
   }
@@ -519,7 +529,7 @@ class SparkSession private(
    * @since 2.0.0
    */
   @Experimental
-  @InterfaceStability.Evolving
+  @Evolving
   def range(end: Long): Dataset[java.lang.Long] = range(0, end)
 
   /**
@@ -530,7 +540,7 @@ class SparkSession private(
    * @since 2.0.0
    */
   @Experimental
-  @InterfaceStability.Evolving
+  @Evolving
   def range(start: Long, end: Long): Dataset[java.lang.Long] = {
     range(start, end, step = 1, numPartitions = sparkContext.defaultParallelism)
   }
@@ -543,7 +553,7 @@ class SparkSession private(
    * @since 2.0.0
    */
   @Experimental
-  @InterfaceStability.Evolving
+  @Evolving
   def range(start: Long, end: Long, step: Long): Dataset[java.lang.Long] = {
     range(start, end, step, numPartitions = sparkContext.defaultParallelism)
   }
@@ -557,7 +567,7 @@ class SparkSession private(
    * @since 2.0.0
    */
   @Experimental
-  @InterfaceStability.Evolving
+  @Evolving
   def range(start: Long, end: Long, step: Long, numPartitions: Int): Dataset[java.lang.Long] = {
     new Dataset(self, Range(start, end, step, numPartitions), Encoders.LONG)
   }
@@ -639,7 +649,11 @@ class SparkSession private(
    * @since 2.0.0
    */
   def sql(sqlText: String): DataFrame = {
-    Dataset.ofRows(self, sessionState.sqlParser.parsePlan(sqlText))
+    val tracker = new QueryPlanningTracker
+    val plan = tracker.measurePhase(QueryPlanningTracker.PARSING) {
+      sessionState.sqlParser.parsePlan(sqlText)
+    }
+    Dataset.ofRows(self, plan, tracker)
   }
 
   /**
@@ -663,7 +677,7 @@ class SparkSession private(
    *
    * @since 2.0.0
    */
-  @InterfaceStability.Evolving
+  @Evolving
   def readStream: DataStreamReader = new DataStreamReader(self)
 
   /**
@@ -677,7 +691,7 @@ class SparkSession private(
     val ret = f
     val end = System.nanoTime()
     // scalastyle:off println
-    println(s"Time taken: ${(end - start) / 1000 / 1000} ms")
+    println(s"Time taken: ${NANOSECONDS.toMillis(end - start)} ms")
     // scalastyle:on println
     ret
   }
@@ -697,7 +711,7 @@ class SparkSession private(
    * @since 2.0.0
    */
   @Experimental
-  @InterfaceStability.Evolving
+  @Evolving
   object implicits extends SQLImplicits with Serializable {
     protected override def _sqlContext: SQLContext = SparkSession.this.sqlContext
   }
@@ -766,13 +780,13 @@ class SparkSession private(
 }
 
 
-@InterfaceStability.Stable
+@Stable
 object SparkSession extends Logging {
 
   /**
    * Builder for [[SparkSession]].
    */
-  @InterfaceStability.Stable
+  @Stable
   class Builder extends Logging {
 
     private[this] val options = new scala.collection.mutable.HashMap[String, String]
@@ -936,23 +950,9 @@ object SparkSession extends Logging {
           // Do not update `SparkConf` for existing `SparkContext`, as it's shared by all sessions.
         }
 
-        // Initialize extensions if the user has defined a configurator class.
-        val extensionConfOption = sparkContext.conf.get(StaticSQLConf.SPARK_SESSION_EXTENSIONS)
-        if (extensionConfOption.isDefined) {
-          val extensionConfClassName = extensionConfOption.get
-          try {
-            val extensionConfClass = Utils.classForName(extensionConfClassName)
-            val extensionConf = extensionConfClass.newInstance()
-              .asInstanceOf[SparkSessionExtensions => Unit]
-            extensionConf(extensions)
-          } catch {
-            // Ignore the error if we cannot find the class or when the class has the wrong type.
-            case e @ (_: ClassCastException |
-                      _: ClassNotFoundException |
-                      _: NoClassDefFoundError) =>
-              logWarning(s"Cannot use $extensionConfClassName to configure session extensions.", e)
-          }
-        }
+        applyExtensions(
+          sparkContext.getConf.get(StaticSQLConf.SPARK_SESSION_EXTENSIONS).getOrElse(Seq.empty),
+          extensions)
 
         session = new SparkSession(sparkContext, None, None, extensions)
         options.foreach { case (k, v) => session.initialSessionOptions.put(k, v) }
@@ -1136,5 +1136,29 @@ object SparkSession extends Logging {
       SparkSession.clearActiveSession()
       SparkSession.clearDefaultSession()
     }
+  }
+
+  /**
+   * Initialize extensions for given extension classnames. The classes will be applied to the
+   * extensions passed into this function.
+   */
+  private def applyExtensions(
+      extensionConfClassNames: Seq[String],
+      extensions: SparkSessionExtensions): SparkSessionExtensions = {
+    extensionConfClassNames.foreach { extensionConfClassName =>
+      try {
+        val extensionConfClass = Utils.classForName(extensionConfClassName)
+        val extensionConf = extensionConfClass.getConstructor().newInstance()
+          .asInstanceOf[SparkSessionExtensions => Unit]
+        extensionConf(extensions)
+      } catch {
+        // Ignore the error if we cannot find the class or when the class has the wrong type.
+        case e@(_: ClassCastException |
+                _: ClassNotFoundException |
+                _: NoClassDefFoundError) =>
+          logWarning(s"Cannot use $extensionConfClassName to configure session extensions.", e)
+      }
+    }
+    extensions
   }
 }

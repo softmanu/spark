@@ -134,6 +134,8 @@ private[kafka010] case class InternalKafkaConsumer(
     /** Reset the internal pre-fetched data. */
     def reset(): Unit = {
       _records = ju.Collections.emptyListIterator()
+      _nextOffsetInFetchedData = UNKNOWN_OFFSET
+      _offsetAfterPoll = UNKNOWN_OFFSET
     }
 
     /**
@@ -195,7 +197,10 @@ private[kafka010] case class InternalKafkaConsumer(
 
   /** Create a KafkaConsumer to fetch records for `topicPartition` */
   private def createConsumer: KafkaConsumer[Array[Byte], Array[Byte]] = {
-    val c = new KafkaConsumer[Array[Byte], Array[Byte]](kafkaParams)
+    val updatedKafkaParams = KafkaConfigUpdater("executor", kafkaParams.asScala.toMap)
+      .setAuthenticationConfigIfNeeded()
+      .build()
+    val c = new KafkaConsumer[Array[Byte], Array[Byte]](updatedKafkaParams)
     val tps = new ju.ArrayList[TopicPartition]()
     tps.add(topicPartition)
     c.assign(tps)
@@ -361,8 +366,9 @@ private[kafka010] case class InternalKafkaConsumer(
       if (offset < fetchedData.offsetAfterPoll) {
         // Offsets in [offset, fetchedData.offsetAfterPoll) are invisible. Return a record to ask
         // the next call to start from `fetchedData.offsetAfterPoll`.
+        val nextOffsetToFetch = fetchedData.offsetAfterPoll
         fetchedData.reset()
-        return fetchedRecord.withRecord(null, fetchedData.offsetAfterPoll)
+        return fetchedRecord.withRecord(null, nextOffsetToFetch)
       } else {
         // Fetch records from Kafka and update `fetchedData`.
         fetchData(offset, pollTimeoutMs)
